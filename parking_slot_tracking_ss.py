@@ -30,7 +30,7 @@ start_frame=[107,63,96,82,50,111,81,100]
 ## Set7: 81
 ## Set8: 100
 
-set_num = 1
+set_num = 5
 FilePath = 'C:/Users/Seokwon/Desktop/Parking_slot_tracking/hyu_171121/171124/rectified/set{}'.format(set_num)
 SS_FilePath = 'C:/Users/Seokwon/Desktop/Parking_slot_tracking/hyu_171121/171124/rectified/set{}/output/labeled/class_1'.format(set_num)
 
@@ -338,7 +338,30 @@ def correctPosition(src_points, src_img, DT_templates, X_DISTURB, Y_DISTURB, ANG
                 corrected_points.append(disturbance_points)
        
     return corrected_points[np.argmin(DCM_cost)], min(DCM_cost)
-                
+
+F = np.array([[1., 0, 0, 0],[0, 1., 0, 0],[0, 0, 1., 0],[0, 0, 0, 1.]])
+H = 1. * np.eye((4))
+Q = 1e-5 * np.eye((4))
+R = 1e-1 * np.eye((4))
+P = 1 * np.eye((4))
+
+def KalmanFilter(predicted_Points, corrected_Points, P):
+    predicted_state = np.array([[predicted_Points[0][0]],[predicted_Points[0][1]],[predicted_Points[1][0]],[predicted_Points[1][1]]])
+    corrected_state = np.array([[corrected_Points[0][0]],[corrected_Points[0][1]],[corrected_Points[1][0]],[corrected_Points[1][1]]])
+    
+    P_priori = np.dot(np.dot(F, P),F.T) + Q
+    K = np.dot(np.dot(P_priori, H.T), np.linalg.inv(np.dot(np.dot(H, P_priori), H.T) + R))
+    
+    state_priori = np.dot(F, predicted_state)
+    state_posteriori = state_priori + np.dot(K,corrected_state - np.dot(H,state_priori))
+    P_posteriori = P_priori - np.dot(np.dot(K,H),P_priori)
+    
+    filtered_points = []
+    filtered_points.append((state_posteriori[0,0],state_posteriori[1,0]))
+    filtered_points.append((state_posteriori[2,0],state_posteriori[3,0]))
+    
+    return filtered_points, P_posteriori
+    
 img = import_image(NumFrame)
 
 img_new = import_image(NumFrame + 1)
@@ -367,11 +390,15 @@ while(1):
                
         cv2.imshow('img_crop',img_crop)
         
+        # import semantic segmentation image
         img_segmentation = cv2.imread(SS_FilePath +  '/{:08d}'.format(NumFrame)  + '.jpg', 0)
         if img_segmentation is None:
             break
+        
+        # crop semantic segmentation image
         img_crop_ss = Image_crop(space, img_segmentation, resize_scale)
             
+        # thresholding croping image
         img_crop_ss[img_crop_ss > 200] = 255
         img_crop_ss[img_crop_ss < 200] = 0
         
@@ -458,6 +485,8 @@ while(1):
             
             pt_list_corrected, cost = correctPosition(pt_list_predicted, img_ss, DT_images, x_disturb, y_disturb, ang_disturb)
 
+            pt_list_corrected , P = KalmanFilter(pt_list_predicted, pt_list_corrected, P)
+            
             pt_list_tracking = pt_list_corrected
             
             print("cost: {}".format(cost))
