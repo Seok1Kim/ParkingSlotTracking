@@ -14,11 +14,12 @@ print(events)
 #from IPython import get_ipython
 #get_ipython().magic('reset -sf')
 
-import cv2, csv
+import cv2
 import numpy as np
 import time
 import pickle
 import matplotlib.pyplot as plt
+from multiprocessing import Pool
 
 start_frame=[107,63,96,82,50,111,81,100]
 ## Set1: 107
@@ -30,14 +31,14 @@ start_frame=[107,63,96,82,50,111,81,100]
 ## Set7: 81
 ## Set8: 100
 
-set_num = 5
+set_num = 7
 FilePath = 'C:/Users/Seokwon/Desktop/Parking_slot_tracking/hyu_171121/171124/rectified/set{}'.format(set_num)
 SS_FilePath = 'C:/Users/Seokwon/Desktop/Parking_slot_tracking/hyu_171121/171124/rectified/set{}/output/labeled/class_1'.format(set_num)
 
 NumFrame = start_frame[set_num-1]
 
-CalibPara = pickle.load(open(FilePath + '/calib.p',"rb"))
-Motion = pickle.load(open(FilePath + '/motion.p',"rb"))
+CalibPara = pickle.load(open(FilePath + '/data/calib.p',"rb"))
+Motion = pickle.load(open(FilePath + '/data/motion.p',"rb"))
 MeterPerPixel = CalibPara['meter_per_pixel']
 XPixelMeter = MeterPerPixel[0][0]
 YPixelMeter = MeterPerPixel[0][1]
@@ -66,7 +67,7 @@ pt_list_tracking = []
 ## definitions of functions
 # mouse callback function
 def import_image(NumFrame):
-    img = cv2.imread(FilePath + '/{:08d}'.format(NumFrame) + '.jpg')
+    img = cv2.imread(FilePath + '/images/{:08d}'.format(NumFrame) + '.jpg')
     if img is not None:
         return img
     if img is None:
@@ -321,8 +322,8 @@ def correctPosition(src_points, src_img, DT_templates, X_DISTURB, Y_DISTURB, ANG
                 
                 # Image cropping and thresholding
                 disturbance_image = Image_crop(disturbance_space, src_img, resize_scale)                
-                disturbance_image[disturbance_image > 200] = 255
-                disturbance_image[disturbance_image < 200] = 0
+                disturbance_image[disturbance_image > 245] = 255
+                disturbance_image[disturbance_image < 245] = 0
                 
                 # getting distance transform images
                 disturbance_DT_images = calculateDT(disturbance_image)
@@ -339,11 +340,11 @@ def correctPosition(src_points, src_img, DT_templates, X_DISTURB, Y_DISTURB, ANG
        
     return corrected_points[np.argmin(DCM_cost)], min(DCM_cost)
 
-F = np.array([[1., 0, 0, 0],[0, 1., 0, 0],[0, 0, 1., 0],[0, 0, 0, 1.]])
+F = 1. * np.eye((4))
 H = 1. * np.eye((4))
-Q = 1e-5 * np.eye((4))
-R = 1e-1 * np.eye((4))
-P = 1 * np.eye((4))
+Q = 1e-6 * np.eye((4))  # process noise covariance
+R = 1e-4 * np.eye((4))  # observation noist covariance
+P = 1 * np.eye((4))     # posteriori error covariance
 
 def KalmanFilter(predicted_Points, corrected_Points, P):
     predicted_state = np.array([[predicted_Points[0][0]],[predicted_Points[0][1]],[predicted_Points[1][0]],[predicted_Points[1][1]]])
@@ -383,6 +384,8 @@ while(1):
     if len(pt_list) == 2:
         # initial position in image coordinate
         pt_list_tracking = pt_list
+        pt_list_motion = pt_list_tracking
+        pt_list_matching = pt_list_tracking
         
         # crop tracking region
         space = estimate_space(pt_list[0], pt_list[1], -90)        
@@ -399,8 +402,8 @@ while(1):
         img_crop_ss = Image_crop(space, img_segmentation, resize_scale)
             
         # thresholding croping image
-        img_crop_ss[img_crop_ss > 200] = 255
-        img_crop_ss[img_crop_ss < 200] = 0
+        img_crop_ss[img_crop_ss > 245] = 255
+        img_crop_ss[img_crop_ss < 245] = 0
         
         # distance transform for initial tracking region
         # - input: cropped semantic segmentation (gray)
@@ -463,6 +466,8 @@ while(1):
         pt_list_predicted = []
         delta_travel_pixel = delta_travel_dist / XPixelMeter        
         pt_list_predicted = predictPosition(pt_list_tracking, delta_yaw, delta_travel_pixel, (VehicleCenterCol, VehicleCenterRow))
+        pt_list_motion_predicted = predictPosition(pt_list_motion, delta_yaw, delta_travel_pixel, (VehicleCenterCol, VehicleCenterRow))
+        pt_list_matching_predicted = predictPosition(pt_list_matching, delta_yaw, delta_travel_pixel, (VehicleCenterCol, VehicleCenterRow))
         
         # out of boundary
         crop_boundary = estimate_space(pt_list_predicted[0], pt_list_predicted[1], -90)
@@ -482,16 +487,21 @@ while(1):
             # - x_disturb
             # - y_disturb 
             # - ang_disturb
-            
+#            pool = Pool(processes = 4)
+#            pt_list_corrected, cost  = pool.map(correctPosition, (pt_list_predicted, img_ss, DT_images, x_disturb, y_disturb, ang_disturb))
             pt_list_corrected, cost = correctPosition(pt_list_predicted, img_ss, DT_images, x_disturb, y_disturb, ang_disturb)
+            pt_list_matching_corrected, cost = correctPosition(pt_list_matching_predicted, img_ss, DT_images, x_disturb, y_disturb, ang_disturb)
 
             pt_list_corrected , P = KalmanFilter(pt_list_predicted, pt_list_corrected, P)
             
             pt_list_tracking = pt_list_corrected
+            pt_list_matching = pt_list_matching_corrected
             
             print("cost: {}".format(cost))
         else:            
             pt_list_tracking = pt_list_predicted
+            pt_list_matching = pt_list_matching_predicted
+        pt_list_motion = pt_list_motion_predicted
             
         print(time.time() - start_time)
         
@@ -499,16 +509,21 @@ while(1):
         sequential_cost.append((NumFrame, cost))
         
         # drawing        
+        cv2.circle(img_src_debug,(int(pt_list_motion[0][0]), int(pt_list_motion[0][1])),5,(0,255,0),-1)
+        cv2.circle(img_src_debug,(int(pt_list_motion[1][0]), int(pt_list_motion[1][1])),5,(0,255,0),-1)
+        cv2.circle(img_src_debug,(int(pt_list_matching[0][0]), int(pt_list_matching[0][1])),5,(255,0,0),-1)
+        cv2.circle(img_src_debug,(int(pt_list_matching[1][0]), int(pt_list_matching[1][1])),5,(255,0,0),-1)
+        
         cv2.circle(img_src_debug,(int(VehicleCenterCol), int(VehicleCenterRow)),2,(0,255,0),-1)
-        cv2.circle(img_src_debug,(int(pt_list_tracking[0][0]), int(pt_list_tracking[0][1])),5,(0,0,255),-1)
-        cv2.circle(img_src_debug,(int(pt_list_tracking[1][0]), int(pt_list_tracking[1][1])),5,(0,0,255),-1)
+        cv2.circle(img_src_debug,(int(pt_list_tracking[0][0]), int(pt_list_tracking[0][1])),5,(255,0,255),-1)
+        cv2.circle(img_src_debug,(int(pt_list_tracking[1][0]), int(pt_list_tracking[1][1])),5,(255,0,255),-1)
 #        cv2.circle(img_src_debug,(tracking_debug_point1[0], tracking_debug_point1[1]),2,(0,0,255),-1)
 #        cv2.circle(img_src_debug,(tracking_debug_point2[0], tracking_debug_point2[1]),2,(0,0,255),-1)
         
        # cv2.imshow('Next image',img_src)
         cv2.imshow('Next image_debug',img_src_debug)
         
-        cv2.imwrite("./hyu_171121/171124/debug/"+str(NumFrame)+".jpg",img_src_debug)
+        cv2.imwrite("./hyu_171121/171124/rectified/set{}/debug/".format(set_num)+str(NumFrame)+".jpg",img_src_debug)
        # cv2.imwrite("b_"+str(NumFrame)+".jpg",img_src_debug)
 
         cv2.waitKey(20)
